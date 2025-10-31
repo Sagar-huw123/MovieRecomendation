@@ -1,434 +1,960 @@
-# app.py - MODIFIED VERSION (no secrets required)
 import streamlit as st
 import pickle
 import pandas as pd
 import requests
-from PIL import Image
-import io
+from streamlit_option_menu import option_menu
 import base64
-from typing import List, Dict, Any
-import os
-
-# Configuration - SIMPLIFIED
-OMDB_API_KEY = "2ee4fbe9"  # Direct assignment
-MOVIES_PICKLE_PATH = "movies.pkl"
-SIMILARITY_PICKLE_PATH = "similarity.pkl"
+import random
+from datetime import datetime
 
 # Page configuration
 st.set_page_config(
-    page_title="Movie Recommender",
+    page_title="MovieFlix",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 
-class MovieRecommender:
-    def __init__(self):
-        self.movies_df = None
-        self.similarity_matrix = None
-        self.load_data()
-
-    def load_data(self):
-        """Load movie data and similarity matrix from pickle files"""
-        try:
-            with open(MOVIES_PICKLE_PATH, 'rb') as f:
-                self.movies_df = pickle.load(f)
-
-            with open(SIMILARITY_PICKLE_PATH, 'rb') as f:
-                self.similarity_matrix = pickle.load(f)
-
-            st.success(f"✅ Loaded {len(self.movies_df)} movies and similarity matrix")
-
-        except Exception as e:
-            st.error(f"❌ Error loading data: {e}")
-            # Create a dummy dataframe for testing if files don't exist
-            self.movies_df = pd.DataFrame({
-                'title': ['The Matrix', 'Inception', 'Avatar', 'The Dark Knight'],
-                'movie_id': [1, 2, 3, 4],
-                'overview': ['A computer hacker learns about the true nature of reality.',
-                           'A thief who steals corporate secrets through dream-sharing technology.',
-                           'A paraplegic marine dispatched to the moon Pandora.',
-                           'Batman faces the Joker, a criminal mastermind.'],
-                'release_date': ['1999-03-31', '2010-07-16', '2009-12-18', '2008-07-18'],
-                'genres': [['Action', 'Sci-Fi'], ['Action', 'Thriller'], ['Action', 'Adventure'], ['Action', 'Crime']],
-                'vote_average': [8.7, 8.8, 7.8, 9.0],
-                'vote_count': [1800000, 2200000, 1200000, 2500000]
-            })
-            st.info("Using sample data for demonstration")
-
-    def get_all_movies(self) -> List[Dict[str, Any]]:
-        """Get all movies with basic information"""
-        movies_list = []
-        for _, row in self.movies_df.iterrows():
-            movie = {
-                'id': str(row.get('movie_id', row.get('id', ''))),
-                'title': row.get('title', 'Unknown'),
-                'year': self._extract_year(row),
-                'genres': self._parse_genres(row),
-                'overview': row.get('overview', 'No overview available.'),
-                'vote_average': row.get('vote_average', 0),
-                'vote_count': row.get('vote_count', 0)
-            }
-            movies_list.append(movie)
-        return movies_list
-
-    def get_recommendations(self, movie_title: str, k: int = 8) -> List[Dict[str, Any]]:
-        """Get movie recommendations based on similarity"""
-        try:
-            # Find movie index
-            movie_idx = self.movies_df[self.movies_df['title'] == movie_title].index
-            if len(movie_idx) == 0:
-                # Try partial match
-                matching_movies = self.movies_df[
-                    self.movies_df['title'].str.contains(movie_title, case=False, na=False)
-                ]
-                if len(matching_movies) == 0:
-                    return []
-                movie_idx = matching_movies.index[0:1]
-
-            movie_idx = movie_idx[0]
-
-            # Get similarity scores
-            sim_scores = list(enumerate(self.similarity_matrix[movie_idx]))
-            sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-
-            # Get top k similar movies (excluding itself)
-            sim_scores = sim_scores[1:k + 1]
-
-            recommendations = []
-            for idx, score in sim_scores:
-                movie_row = self.movies_df.iloc[idx]
-                rec_movie = {
-                    'id': str(movie_row.get('movie_id', movie_row.get('id', ''))),
-                    'title': movie_row.get('title', 'Unknown'),
-                    'year': self._extract_year(movie_row),
-                    'genres': self._parse_genres(movie_row),
-                    'score': float(score),
-                    'overview': movie_row.get('overview', 'No overview available.'),
-                    'vote_average': movie_row.get('vote_average', 0),
-                    'vote_count': movie_row.get('vote_count', 0)
-                }
-                recommendations.append(rec_movie)
-
-            return recommendations
-
-        except Exception as e:
-            st.error(f"Error getting recommendations: {e}")
-            # Return dummy recommendations for testing
-            return [
-                {
-                    'id': '1',
-                    'title': 'The Matrix Reloaded',
-                    'year': 2003,
-                    'genres': ['Action', 'Sci-Fi'],
-                    'score': 0.95,
-                    'overview': 'Neo and the rebels continue their fight against the machines.',
-                    'vote_average': 7.2,
-                    'vote_count': 500000
-                },
-                {
-                    'id': '2',
-                    'title': 'Inception',
-                    'year': 2010,
-                    'genres': ['Action', 'Thriller'],
-                    'score': 0.92,
-                    'overview': 'A thief who steals corporate secrets through dream-sharing technology.',
-                    'vote_average': 8.8,
-                    'vote_count': 2200000
-                }
-            ]
-
-    def search_movies(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Search movies by title"""
-        if not query:
-            return self.get_all_movies()[:limit]
-
-        query_lower = query.lower()
-        matching_movies = []
-
-        for movie in self.get_all_movies():
-            if query_lower in movie['title'].lower():
-                matching_movies.append(movie)
-
-        return matching_movies[:limit]
-
-    def _extract_year(self, row) -> int:
-        """Extract year from release date or other fields"""
-        try:
-            # Try to get year from release_date
-            release_date = row.get('release_date')
-            if pd.notna(release_date) and release_date:
-                if isinstance(release_date, str) and len(release_date) >= 4:
-                    return int(release_date[:4])
-
-            # Try from title (e.g., "Movie Title (2021)")
-            title = row.get('title', '')
-            if '(' in title and ')' in title:
-                import re
-                year_match = re.search(r'\((\d{4})\)', title)
-                if year_match:
-                    return int(year_match.group(1))
-
-            return 2000  # Default year
-        except:
-            return 2000
-
-    def _parse_genres(self, row) -> List[str]:
-        """Parse genres from row data"""
-        try:
-            genres = row.get('genres', [])
-            if isinstance(genres, str):
-                # Handle string representation of list
-                import ast
-                try:
-                    genres = ast.literal_eval(genres)
-                except:
-                    genres = [genres]
-
-            if isinstance(genres, list):
-                # Extract genre names from dict format
-                genre_names = []
-                for genre in genres:
-                    if isinstance(genre, dict) and 'name' in genre:
-                        genre_names.append(genre['name'])
-                    elif isinstance(genre, str):
-                        genre_names.append(genre)
-                return genre_names[:3]  # Limit to 3 genres
-
-            return ['Action', 'Drama']  # Default genres
-        except:
-            return ['Action', 'Drama']
-
-
-class OMDBApi:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = "http://www.omdbapi.com/"
-
-    def get_movie_poster(self, title: str, year: int = None):
-        """Get movie poster URL from OMDB API"""
-        try:
-            params = {
-                'apikey': self.api_key,
-                't': title,
-                'type': 'movie'
-            }
-            if year:
-                params['y'] = year
-
-            response = requests.get(self.base_url, params=params, timeout=10)
-            data = response.json()
-
-            if data.get('Response') == 'True' and data.get('Poster') != 'N/A':
-                return data['Poster']
-            else:
-                return None
-
-        except Exception as e:
-            st.warning(f"Could not fetch poster for {title}: {e}")
-            return None
-
-
-def load_css():
-    """Load custom CSS for styling"""
+# Custom CSS for royal green styling
+def local_css():
     st.markdown("""
     <style>
-    .movie-card {
-        border: 1px solid #ddd;
-        border-radius: 10px;
-        padding: 15px;
-        margin: 10px 0;
-        background: white;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        transition: transform 0.2s;
-    }
-    .movie-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    }
-    .recommendation-card {
-        border-left: 4px solid #ff4b4b;
-    }
-    .similarity-score {
-        background: #ff4b4b;
+    /* Main background */
+    .stApp {
+        background-color: #141414;
         color: white;
-        padding: 2px 8px;
-        border-radius: 12px;
-        font-size: 0.8em;
+    }
+
+    /* Sidebar styling */
+    .css-1d391kg, .css-12oz5g7 {
+        background-color: #141414;
+    }
+
+    /* Text color */
+    .css-10trblm, .css-16idsys p, .css-1cpxqw2 {
+        color: white !important;
+    }
+
+    /* Button styling */
+    .stButton button {
+        background-color: #1e7b1e;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 10px 20px;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }
+
+    .stButton button:hover {
+        background-color: #2a9a2a;
+        transform: scale(1.05);
+    }
+
+    /* Selectbox styling */
+    .stSelectbox div[data-baseweb="select"] {
+        background-color: #333;
+        color: white;
+        border-radius: 4px;
+    }
+
+    /* Header styling */
+    .main-header {
+        font-size: 3.5rem;
+        font-weight: bold;
+        background: linear-gradient(90deg, #1e7b1e, #4CAF50);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+
+    /* Movie card styling */
+    .movie-card {
+        background-color: #2f2f2f;
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px;
+        transition: transform 0.3s ease;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .movie-card:hover {
+        transform: translateY(-10px);
+        box-shadow: 0 10px 20px rgba(30, 123, 30, 0.3);
+    }
+
+    .movie-title {
+        font-weight: bold;
+        font-size: 1.1rem;
+        margin-top: 10px;
+        color: white;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex-grow: 0;
+    }
+
+    .movie-year {
+        color: #888;
+        font-size: 0.9rem;
+        margin-bottom: 10px;
+    }
+
+    .movie-overview {
+        color: #d2d2d2;
+        font-size: 0.9rem;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        flex-grow: 1;
+    }
+
+    /* Recommendation section */
+    .recommendation-section {
+        margin: 30px 0;
+    }
+
+    .section-title {
+        font-size: 1.8rem;
+        font-weight: bold;
+        margin-bottom: 20px;
+        color: white;
+        border-left: 5px solid #1e7b1e;
+        padding-left: 15px;
+    }
+
+    /* Loading animation */
+    .loading {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 200px;
+    }
+
+    /* Footer */
+    .footer {
+        text-align: center;
+        margin-top: 50px;
+        padding: 30px;
+        color: #b0b0b0;
+        border-top: 1px solid #333;
+        background: linear-gradient(180deg, #141414 0%, #1a1a1a 100%);
+    }
+
+    .footer-title {
+        font-size: 1.2rem;
+        font-weight: bold;
+        color: #1e7b1e;
+        margin-bottom: 10px;
+    }
+
+    .footer-text {
+        font-size: 0.9rem;
+        line-height: 1.5;
+    }
+
+    /* Movie info in cards */
+    .movie-info {
+        flex-grow: 1;
+        display: flex;
+        flex-direction: column;
+    }
+
+    /* Developer credit */
+    .developer-credit {
+        text-align: center;
+        margin-top: 20px;
+        padding: 15px;
+        background: linear-gradient(90deg, #1e7b1e, #4CAF50);
+        border-radius: 8px;
+        color: white;
         font-weight: bold;
     }
-    .genre-tag {
-        background: #e0e0e0;
-        padding: 2px 8px;
-        border-radius: 10px;
-        font-size: 0.8em;
-        margin-right: 5px;
+
+    /* Hide deprecated warning */
+    .stDecoration {
+        display: none;
+    }
+
+    /* Trailer button styling */
+    .trailer-button {
+        background: linear-gradient(45deg, #FF0000, #CC0000) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 4px !important;
+        padding: 8px 16px !important;
+        font-weight: bold !important;
+        margin-top: 10px !important;
+        width: 100% !important;
+    }
+
+    .trailer-button:hover {
+        background: linear-gradient(45deg, #CC0000, #990000) !important;
+        transform: scale(1.02) !important;
+    }
+
+    /* YouTube embed styling */
+    .youtube-container {
+        position: relative;
+        width: 100%;
+        height: 0;
+        padding-bottom: 56.25%;
+        margin: 20px 0;
+    }
+
+    .youtube-iframe {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+    }
+
+    /* Chat message styling */
+    .user-message {
+        background: linear-gradient(135deg, #1e7b1e, #2a9a2a);
+        color: white;
+        padding: 12px 16px;
+        border-radius: 18px 18px 4px 18px;
+        margin: 8px 0;
+        max-width: 80%;
+        margin-left: auto;
+    }
+
+    .bot-message {
+        background: #2f2f2f;
+        color: white;
+        padding: 12px 16px;
+        border-radius: 18px 18px 18px 4px;
+        margin: 8px 0;
+        max-width: 80%;
+        margin-right: auto;
+        border: 1px solid #444;
+    }
+
+    /* Comparison styling */
+    .comparison-card {
+        background: linear-gradient(135deg, #2f2f2f, #3a3a3a);
+        border-radius: 12px;
+        padding: 20px;
+        margin: 15px 0;
+        border: 1px solid #444;
+    }
+
+    /* Statistics styling */
+    .stat-card {
+        background: linear-gradient(135deg, #1e7b1e, #2a9a2a);
+        border-radius: 12px;
+        padding: 20px;
+        margin: 10px;
+        text-align: center;
+        color: white;
+    }
+
+    .stat-number {
+        font-size: 2.5rem;
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+
+    .stat-label {
+        font-size: 0.9rem;
+        opacity: 0.9;
     }
     </style>
     """, unsafe_allow_html=True)
 
 
-def display_movie_card(movie: Dict[str, Any], omdb_api: OMDBApi, show_score: bool = False):
-    """Display a movie card with poster and details"""
-    col1, col2 = st.columns([1, 3])
+# Initialize session state
+def initialize_session_state():
+    if 'user_profile' not in st.session_state:
+        st.session_state.user_profile = {
+            'liked_movies': [],
+            'watched_movies': [],
+            'watchlist': [],
+            'ratings': {},
+            'joined_date': datetime.now().strftime("%Y-%m-%d")
+        }
+
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+
+    if 'compared_movies' not in st.session_state:
+        st.session_state.compared_movies = []
+
+
+# Load data and similarity matrix
+@st.cache_data
+def load_data():
+    movies = pickle.load(open('movies.pkl', 'rb'))
+    similarity = pickle.load(open('similarity.pkl', 'rb'))
+    return movies, similarity
+
+
+# Fetch movie poster and details from OMDB API
+def fetch_movie_details(movie_title):
+    try:
+        OMDB_API_KEY = "7dc44734"
+
+        # Search for the movie by title
+        url = f"http://www.omdbapi.com/?t={movie_title}&apikey={OMDB_API_KEY}"
+        response = requests.get(url)
+        data = response.json()
+
+        if data['Response'] == 'True':
+            return {
+                'poster': data.get('Poster', 'https://via.placeholder.com/500x750/2f2f2f/ffffff?text=No+Image'),
+                'year': data.get('Year', 'N/A'),
+                'plot': data.get('Plot', 'No description available.'),
+                'genre': data.get('Genre', 'N/A'),
+                'rating': data.get('imdbRating', 'N/A'),
+                'imdb_id': data.get('imdbID', ''),
+                'director': data.get('Director', 'N/A'),
+                'actors': data.get('Actors', 'N/A'),
+                'runtime': data.get('Runtime', 'N/A')
+            }
+        else:
+            return {
+                'poster': 'https://via.placeholder.com/500x750/2f2f2f/ffffff?text=No+Image',
+                'year': 'N/A',
+                'plot': 'No description available.',
+                'genre': 'N/A',
+                'rating': 'N/A',
+                'imdb_id': '',
+                'director': 'N/A',
+                'actors': 'N/A',
+                'runtime': 'N/A'
+            }
+    except Exception as e:
+        return {
+            'poster': 'https://via.placeholder.com/500x750/2f2f2f/ffffff?text=No+Image',
+            'year': 'N/A',
+            'plot': 'No description available.',
+            'genre': 'N/A',
+            'rating': 'N/A',
+            'imdb_id': '',
+            'director': 'N/A',
+            'actors': 'N/A',
+            'runtime': 'N/A'
+        }
+
+
+# Fetch YouTube trailer using YouTube Data API
+def fetch_youtube_trailer(movie_title, year=""):
+    try:
+        YOUTUBE_API_KEY = "AIzaSyAfgiry5l1sjctL4qSaX4WoHrleYlvbYs0"
+
+        # Search for trailer
+        search_query = f"{movie_title} {year} official trailer"
+        url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={search_query}&type=video&key={YOUTUBE_API_KEY}&maxResults=1"
+
+        response = requests.get(url)
+        data = response.json()
+
+        if 'items' in data and len(data['items']) > 0:
+            video_id = data['items'][0]['id']['videoId']
+            return f"https://www.youtube.com/embed/{video_id}"
+        else:
+            return None
+    except Exception as e:
+        return None
+
+
+# Recommendation function
+def recommend(movie, movies, similarity):
+    try:
+        movie_index = movies[movies['title'] == movie].index[0]
+        distances = similarity[movie_index]
+        movies_list = sorted(list(enumerate(distances)), reverse=True, key=lambda x: x[1])[1:11]
+
+        recommended_movies = []
+        recommended_details = []
+
+        for i in movies_list:
+            movie_title = movies.iloc[i[0]].title
+            recommended_movies.append(movie_title)
+            # Fetch movie details including poster
+            movie_details = fetch_movie_details(movie_title)
+            recommended_details.append(movie_details)
+
+        return recommended_movies, recommended_details
+    except Exception as e:
+        st.error(f"Error generating recommendations: {e}")
+        return [], []
+
+
+# Function to display trailer in a modal
+def show_trailer(movie_title, movie_details):
+    trailer_url = fetch_youtube_trailer(movie_title, movie_details.get('year', ''))
+
+    if trailer_url:
+        st.markdown(f"""
+        <div class="youtube-container">
+            <iframe class="youtube-iframe" src="{trailer_url}" 
+                    frameborder="0" allow="accelerometer; autoplay; clipboard-write; 
+                    encrypted-media; gyroscope; picture-in-picture" allowfullscreen>
+            </iframe>
+        </div>
+        """, unsafe_allow_html=True)
+        st.success(f"🎬 Watching trailer for: **{movie_title}**")
+    else:
+        st.warning(f"🚫 Trailer not available for **{movie_title}**")
+
+
+# User Statistics Functions
+def display_user_statistics():
+    st.markdown('<div class="section-title">📊 Your Movie Statistics</div>', unsafe_allow_html=True)
+
+    profile = st.session_state.user_profile
+    total_watched = len(profile['watched_movies'])
+    total_watchlist = len(profile['watchlist'])
+    total_liked = len(profile['liked_movies'])
+
+    # Calculate average rating
+    ratings = list(profile['ratings'].values())
+    avg_rating = sum(ratings) / len(ratings) if ratings else 0
+
+    # Display stats in cards
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        # Try to get poster from OMDB
-        poster_url = omdb_api.get_movie_poster(movie['title'], movie['year'])
-        if poster_url and poster_url != 'N/A':
-            st.image(poster_url, width=120)
-        else:
-            st.image("https://via.placeholder.com/120x180/cccccc/666666?text=No+Poster", width=120)
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number">{total_watched}</div>
+            <div class="stat-label">Movies Watched</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     with col2:
-        st.subheader(movie['title'])
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number">{total_watchlist}</div>
+            <div class="stat-label">In Watchlist</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Year and rating
-        col2a, col2b, col2c = st.columns([1, 1, 1])
-        with col2a:
-            st.write(f"**Year:** {movie['year']}")
-        with col2b:
-            st.write(f"**Rating:** ⭐ {movie['vote_average']}/10")
-        with col2c:
-            if show_score:
-                st.markdown(f'<span class="similarity-score">{movie["score"] * 100:.1f}%</span>',
-                            unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number">{total_liked}</div>
+            <div class="stat-label">Liked Movies</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Genres
-        if movie['genres']:
-            genre_tags = " ".join([f'<span class="genre-tag">{genre}</span>' for genre in movie['genres']])
-            st.markdown(f"**Genres:** {genre_tags}", unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number">{avg_rating:.1f} ⭐</div>
+            <div class="stat-label">Avg Rating</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Overview
-        with st.expander("Overview"):
-            st.write(movie['overview'][:300] + "..." if len(movie['overview']) > 300 else movie['overview'])
-
-        # Action buttons
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            if st.button("🎬 Get Recommendations", key=f"rec_{movie['id']}_{movie['title']}"):
-                st.session_state.selected_movie = movie['title']
-                st.session_state.show_recommendations = True
-                st.rerun()
-        with col_btn2:
-            if st.button("❤️ Add to Favorites", key=f"fav_{movie['id']}_{movie['title']}"):
-                if 'favorites' not in st.session_state:
-                    st.session_state.favorites = []
-                if movie['title'] not in st.session_state.favorites:
-                    st.session_state.favorites.append(movie['title'])
-                    st.success(f"Added {movie['title']} to favorites!")
-
-    st.markdown("---")
+    # Recent activity
+    st.subheader("Recent Activity")
+    if profile['watched_movies']:
+        st.write("**Recently Watched:**")
+        recent_movies = profile['watched_movies'][-5:]
+        for movie in reversed(recent_movies):
+            st.write(f"• {movie}")
+    else:
+        st.info("No movies watched yet. Start exploring!")
 
 
+# Movie Comparison Functions
+def compare_movies(movie1, movie2):
+    st.markdown('<div class="section-title">🎭 Movie Comparison</div>', unsafe_allow_html=True)
+
+    details1 = fetch_movie_details(movie1)
+    details2 = fetch_movie_details(movie2)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown(f"""
+        <div class="comparison-card">
+            <div style="text-align: center;">
+                <img src="{details1['poster']}" style="width: 200px; border-radius: 8px; margin-bottom: 15px;">
+                <h3>{movie1}</h3>
+                <p><strong>⭐ {details1['rating']}</strong> | {details1['year']}</p>
+            </div>
+            <div style="margin-top: 15px;">
+                <p><strong>Genre:</strong> {details1['genre']}</p>
+                <p><strong>Director:</strong> {details1['director']}</p>
+                <p><strong>Runtime:</strong> {details1['runtime']}</p>
+                <p><strong>Cast:</strong> {details1['actors']}</p>
+            </div>
+            <div style="margin-top: 15px;">
+                <p><strong>Plot:</strong> {details1['plot']}</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+        <div class="comparison-card">
+            <div style="text-align: center;">
+                <img src="{details2['poster']}" style="width: 200px; border-radius: 8px; margin-bottom: 15px;">
+                <h3>{movie2}</h3>
+                <p><strong>⭐ {details2['rating']}</strong> | {details2['year']}</p>
+            </div>
+            <div style="margin-top: 15px;">
+                <p><strong>Genre:</strong> {details2['genre']}</p>
+                <p><strong>Director:</strong> {details2['director']}</p>
+                <p><strong>Runtime:</strong> {details2['runtime']}</p>
+                <p><strong>Cast:</strong> {details2['actors']}</p>
+            </div>
+            <div style="margin-top: 15px;">
+                <p><strong>Plot:</strong> {details2['plot']}</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Comparison metrics
+    st.subheader("📈 Quick Comparison")
+    comp_col1, comp_col2, comp_col3 = st.columns(3)
+
+    with comp_col1:
+        rating1 = float(details1['rating']) if details1['rating'] != 'N/A' else 0
+        rating2 = float(details2['rating']) if details2['rating'] != 'N/A' else 0
+        if rating1 > rating2:
+            st.success(f"🏆 **{movie1}** has higher rating")
+        elif rating2 > rating1:
+            st.success(f"🏆 **{movie2}** has higher rating")
+        else:
+            st.info("⭐ Both have similar ratings")
+
+    with comp_col2:
+        year1 = int(details1['year']) if details1['year'].isdigit() else 0
+        year2 = int(details2['year']) if details2['year'].isdigit() else 0
+        if year1 > year2:
+            st.info(f"🆕 **{movie1}** is newer")
+        elif year2 > year1:
+            st.info(f"🆕 **{movie2}** is newer")
+        else:
+            st.info("📅 Released in same year")
+
+    with comp_col3:
+        # Simple genre comparison
+        genres1 = set(details1['genre'].split(', '))
+        genres2 = set(details2['genre'].split(', '))
+        common_genres = genres1.intersection(genres2)
+        if common_genres:
+            st.info(f"🎭 Common genres: {', '.join(common_genres)}")
+
+
+# AI Chatbot Functions
+def movie_chatbot():
+    st.markdown('<div class="section-title">🤖 Movie Assistant</div>', unsafe_allow_html=True)
+    st.write("Ask me about movies, get recommendations, or discuss your favorites!")
+
+    # Chat container
+    chat_container = st.container()
+
+    # Display chat history
+    with chat_container:
+        for message in st.session_state.chat_history:
+            if message['role'] == 'user':
+                st.markdown(f'<div class="user-message">{message["content"]}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="bot-message">{message["content"]}</div>', unsafe_allow_html=True)
+
+    # Chat input
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        user_input = st.text_input("Type your message...", key="chat_input", placeholder="Ask about movies...")
+    with col2:
+        send_button = st.button("Send", use_container_width=True)
+
+    if send_button and user_input:
+        # Add user message to chat
+        st.session_state.chat_history.append({'role': 'user', 'content': user_input})
+
+        # Generate bot response
+        bot_response = generate_chat_response(user_input)
+        st.session_state.chat_history.append({'role': 'bot', 'content': bot_response})
+
+        # Rerun to update chat
+        st.rerun()
+
+
+def generate_chat_response(user_input):
+    """Generate AI response based on user input"""
+    user_input_lower = user_input.lower()
+
+    # Greeting responses
+    if any(word in user_input_lower for word in ['hello', 'hi', 'hey', 'hola']):
+        responses = [
+            "Hello! I'm your movie assistant. How can I help you today?",
+            "Hi there! Ready to explore some amazing movies?",
+            "Hey! What movies are you interested in today?"
+        ]
+        return random.choice(responses)
+
+    # Recommendation requests
+    elif any(word in user_input_lower for word in ['recommend', 'suggest', 'what should i watch', 'movie suggestion']):
+        if 'action' in user_input_lower:
+            return "For action movies, I'd recommend: Mad Max: Fury Road, John Wick, The Dark Knight, or Mission: Impossible!"
+        elif 'comedy' in user_input_lower:
+            return "Great choice! For comedy, check out: Superbad, The Hangover, Step Brothers, or Bridesmaids!"
+        elif 'romance' in user_input_lower:
+            return "For romantic movies, try: The Notebook, La La Land, Crazy Rich Asians, or Pride and Prejudice!"
+        elif 'horror' in user_input_lower:
+            return "If you like horror: Get Out, The Conjuring, A Quiet Place, or Hereditary are excellent choices!"
+        else:
+            return "I'd love to recommend some movies! Could you tell me what genre you're in the mood for? Or maybe a movie you recently enjoyed?"
+
+    # Movie information requests
+    elif any(word in user_input_lower for word in ['about', 'tell me about', 'info', 'information']):
+        movie_mentions = [word for word in user_input_lower.split() if len(word) > 3]
+        if movie_mentions:
+            return f"I can look up information about {movie_mentions[0].title()}. Try using the 'Browse Movies' section for detailed info!"
+        else:
+            return "Which movie would you like to know more about? I can help you find information about any movie!"
+
+    # Rating questions
+    elif any(word in user_input_lower for word in ['rating', 'score', 'imdb', 'rotten tomatoes']):
+        return "I can check movie ratings from various sources. Which movie's rating are you curious about?"
+
+    # General movie discussion
+    elif any(word in user_input_lower for word in ['movie', 'film', 'cinema']):
+        responses = [
+            "Movies are amazing! What's your all-time favorite film?",
+            "I love discussing movies! Have you seen any good ones recently?",
+            "The world of cinema is so diverse! Are you into classics or prefer modern films?",
+            "What genre excites you the most? Action, drama, comedy, or something else?"
+        ]
+        return random.choice(responses)
+
+    # Fallback responses
+    else:
+        fallback_responses = [
+            "I'm here to help with movies! You can ask me for recommendations, movie info, or just chat about films.",
+            "That's interesting! As a movie assistant, I can help you find great films to watch.",
+            "I'd love to talk about movies with you! What kind of films do you enjoy?",
+            "Let's focus on movies! I can recommend films, compare movies, or discuss your favorites."
+        ]
+        return random.choice(fallback_responses)
+
+
+# User interaction functions
+def add_to_watchlist(movie_title):
+    if movie_title not in st.session_state.user_profile['watchlist']:
+        st.session_state.user_profile['watchlist'].append(movie_title)
+        return True
+    return False
+
+
+def mark_as_watched(movie_title):
+    if movie_title not in st.session_state.user_profile['watched_movies']:
+        st.session_state.user_profile['watched_movies'].append(movie_title)
+        return True
+    return False
+
+
+def rate_movie(movie_title, rating):
+    st.session_state.user_profile['ratings'][movie_title] = rating
+
+
+# Main app
 def main():
     # Initialize session state
-    if 'selected_movie' not in st.session_state:
-        st.session_state.selected_movie = None
-    if 'show_recommendations' not in st.session_state:
-        st.session_state.show_recommendations = False
-    if 'favorites' not in st.session_state:
-        st.session_state.favorites = []
+    initialize_session_state()
 
-    # Load CSS
-    load_css()
+    # Apply custom CSS
+    local_css()
 
-    # Header
-    st.title("🎬 Movie Recommender System")
-    st.markdown("Discover your next favorite movie based on your preferences!")
+    # Load data
+    movies, similarity = load_data()
+    movie_list = movies['title'].values
 
-    # Initialize recommender and OMDB API
-    try:
-        recommender = MovieRecommender()
-        omdb_api = OMDBApi(OMDB_API_KEY)
-    except Exception as e:
-        st.error(f"Failed to initialize the recommender system: {e}")
-        return
-
-    # Sidebar
+    # Sidebar navigation
     with st.sidebar:
-        st.header("🔍 Search & Filter")
+        # Developer logo/name instead of Netflix
+        st.markdown("""
+        <div style='text-align: center; padding: 20px 0;'>
+            <h2 style='color: #1e7b1e; font-size: 1.8rem; font-weight: bold;'>MovieFlix</h2>
+            <p style='color: #888; font-size: 0.9rem;'>Developed by SAGAR</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Search
-        search_query = st.text_input("Search movies", placeholder="Enter movie title...")
-
-        # Genre filter (if available)
-        all_movies = recommender.get_all_movies()
-        all_genres = set()
-        for movie in all_movies:
-            all_genres.update(movie['genres'])
-        selected_genres = st.multiselect("Filter by genres", sorted(all_genres))
-
-        # Number of recommendations
-        k_recommendations = st.slider("Number of recommendations", 4, 20, 8)
-
-        # Favorites section
-        if st.session_state.favorites:
-            st.header("❤️ Your Favorites")
-            for fav in st.session_state.favorites:
-                if st.button(f"🎬 {fav}", key=f"fav_btn_{fav}"):
-                    st.session_state.selected_movie = fav
-                    st.session_state.show_recommendations = True
-                    st.rerun()
-
-        st.markdown("---")
-        st.info("💡 **Tip:** Click 'Get Recommendations' on any movie to find similar films!")
-
-    # Main content area
-    if st.session_state.show_recommendations and st.session_state.selected_movie:
-        # Show recommendations
-        st.header(f"🎯 Recommendations similar to: **{st.session_state.selected_movie}**")
-
-        if st.button("← Back to all movies"):
-            st.session_state.show_recommendations = False
-            st.session_state.selected_movie = None
-            st.rerun()
-
-        recommendations = recommender.get_recommendations(
-            st.session_state.selected_movie,
-            k=k_recommendations
+        selected = option_menu(
+            menu_title="Navigation",
+            options=["Home", "Recommendations", "Browse Movies", "Movie Comparison", "User Statistics", "AI Assistant"],
+            icons=["house", "film", "search", "balance", "graph-up", "robot"],
+            menu_icon="cast",
+            default_index=0,
+            styles={
+                "container": {"padding": "5px", "background-color": "#141414"},
+                "icon": {"color": "#1e7b1e", "font-size": "20px"},
+                "nav-link": {"font-size": "16px", "text-align": "left", "margin": "0px", "--hover-color": "#2f2f2f"},
+                "nav-link-selected": {"background-color": "#1e7b1e"},
+            }
         )
 
-        if recommendations:
-            st.success(f"Found {len(recommendations)} recommendations!")
-            for movie in recommendations:
-                display_movie_card(movie, omdb_api, show_score=True)
-        else:
-            st.warning("No recommendations found. Try a different movie.")
+    # Home page
+    if selected == "Home":
+        st.markdown('<h1 class="main-header">MovieFlix</h1>', unsafe_allow_html=True)
 
-    else:
-        # Show all/search results
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.markdown("""
+            <h2 style='color: white;'>Discover Your Next Favorite Movie</h2>
+            <p style='font-size: 1.2rem; color: #d2d2d2;'>
+            Welcome to MovieFlix, your personal movie recommendation engine. 
+            Find movies similar to your favorites with our advanced AI-powered system.
+            </p>
+            <ul style='color: #d2d2d2; font-size: 1.1rem;'>
+                <li>Personalized recommendations based on your movie preferences</li>
+                <li>Thousands of movies in our database</li>
+                <li>Watch trailers directly in the app</li>
+                <li>Get recommendations in seconds</li>
+                <li>Compare movies side-by-side</li>
+                <li>Track your movie statistics</li>
+                <li>Chat with AI movie assistant</li>
+                <li>Detailed movie information with posters and ratings</li>
+            </ul>
+            """, unsafe_allow_html=True)
+
+            if st.button("Get Started →", key="home_button"):
+                st.session_state.page = "Recommendations"
+
+        with col2:
+            st.image("https://cdn.pixabay.com/photo/2019/04/24/21/55/cinema-4153289_1280.jpg", use_container_width=True)
+
+    # Recommendations page
+    elif selected == "Recommendations":
+        st.markdown('<h1 class="main-header">Movie Recommendations</h1>', unsafe_allow_html=True)
+
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            selected_movie = st.selectbox(
+                "Select a movie you like:",
+                movie_list,
+                index=0,
+                help="Choose a movie to get similar recommendations"
+            )
+
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("Find Similar Movies", key="recommend_button"):
+                with st.spinner('Finding the best recommendations for you...'):
+                    recommended_movies, recommended_details = recommend(selected_movie, movies, similarity)
+
+                    if recommended_movies:
+                        st.session_state.recommended_movies = recommended_movies
+                        st.session_state.recommended_details = recommended_details
+                        st.session_state.selected_movie = selected_movie
+                    else:
+                        st.error("Sorry, we couldn't find recommendations for this movie.")
+
+        # Display recommendations if available
+        if hasattr(st.session_state, 'recommended_movies') and st.session_state.recommended_movies:
+            st.markdown(f'<div class="section-title">Movies Similar to "{st.session_state.selected_movie}"</div>',
+                        unsafe_allow_html=True)
+
+            # Display movies in a grid with trailer buttons
+            cols = st.columns(5)
+            for idx, (movie, details) in enumerate(
+                    zip(st.session_state.recommended_movies, st.session_state.recommended_details)):
+                with cols[idx % 5]:
+                    with st.container():
+                        st.markdown('<div class="movie-card">', unsafe_allow_html=True)
+                        st.image(details['poster'], use_container_width=True)
+                        st.markdown('<div class="movie-info">', unsafe_allow_html=True)
+                        st.markdown(f'<div class="movie-title">{movie}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="movie-year">{details["year"]} • ⭐ {details["rating"]}</div>',
+                                    unsafe_allow_html=True)
+                        st.markdown(f'<div class="movie-overview">{details["plot"]}</div>', unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                        # Action buttons
+                        col_btn1, col_btn2, col_btn3 = st.columns(3)
+                        with col_btn1:
+                            if st.button("🎬", key=f"trailer_{idx}", help="Watch Trailer"):
+                                st.session_state.current_trailer_movie = movie
+                                st.session_state.current_trailer_details = details
+                        with col_btn2:
+                            if st.button("➕", key=f"watchlist_{idx}", help="Add to Watchlist"):
+                                if add_to_watchlist(movie):
+                                    st.success(f"Added {movie} to watchlist!")
+                        with col_btn3:
+                            if st.button("👁️", key=f"watched_{idx}", help="Mark as Watched"):
+                                if mark_as_watched(movie):
+                                    st.success(f"Marked {movie} as watched!")
+
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+            # Display trailer if a movie is selected
+            if hasattr(st.session_state, 'current_trailer_movie'):
+                st.markdown("---")
+                st.markdown(f'<div class="section-title">Trailer: {st.session_state.current_trailer_movie}</div>',
+                            unsafe_allow_html=True)
+                show_trailer(st.session_state.current_trailer_movie, st.session_state.current_trailer_details)
+
+    # Browse Movies page
+    elif selected == "Browse Movies":
+        st.markdown('<h1 class="main-header">Browse Movies</h1>', unsafe_allow_html=True)
+
+        # Search and filter options
+        col1, col2, col3 = st.columns([2, 1, 1])
+
+        with col1:
+            search_query = st.text_input("Search movies:", placeholder="Type to search...")
+
+        with col2:
+            sort_option = st.selectbox("Sort by:", ["Title", "Popularity"])
+
+        with col3:
+            items_per_page = st.selectbox("Movies per page:", [10, 20, 50])
+
+        # Filter movies based on search
         if search_query:
-            st.header(f"🔍 Search Results for: '{search_query}'")
-            movies = recommender.search_movies(search_query, limit=50)
+            filtered_movies = movies[movies['title'].str.contains(search_query, case=False)]
         else:
-            st.header("🎬 All Movies")
-            movies = all_movies[:100]  # Limit to first 100 for performance
+            filtered_movies = movies
 
-        # Apply genre filter
-        if selected_genres:
-            movies = [m for m in movies if any(genre in m['genres'] for genre in selected_genres)]
+        # Sort movies
+        if sort_option == "Title":
+            filtered_movies = filtered_movies.sort_values('title')
 
-        if not movies:
-            st.warning("No movies found matching your criteria.")
+        # Pagination
+        total_movies = len(filtered_movies)
+        if total_movies > 0:
+            total_pages = (total_movies - 1) // items_per_page + 1
+
+            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
+            start_idx = (page - 1) * items_per_page
+            end_idx = min(start_idx + items_per_page, total_movies)
+
+            st.write(f"Showing {start_idx + 1}-{end_idx} of {total_movies} movies")
+
+            # Display movies in grid
+            movie_chunk = filtered_movies.iloc[start_idx:end_idx]
+            rows = (len(movie_chunk) - 1) // 5 + 1
+
+            for row in range(rows):
+                cols = st.columns(5)
+                for col_idx in range(5):
+                    movie_idx = row * 5 + col_idx
+                    if movie_idx < len(movie_chunk):
+                        movie = movie_chunk.iloc[movie_idx]
+                        with cols[col_idx]:
+                            with st.container():
+                                st.markdown('<div class="movie-card">', unsafe_allow_html=True)
+                                # Fetch movie details for browse view
+                                movie_details = fetch_movie_details(movie["title"])
+                                st.image(movie_details['poster'], use_container_width=True)
+                                st.markdown('<div class="movie-info">', unsafe_allow_html=True)
+                                st.markdown(f'<div class="movie-title">{movie["title"]}</div>', unsafe_allow_html=True)
+                                st.markdown(
+                                    f'<div class="movie-year">{movie_details["year"]} • ⭐ {movie_details["rating"]}</div>',
+                                    unsafe_allow_html=True)
+                                st.markdown('</div>', unsafe_allow_html=True)
+
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    if st.button("🎬", key=f"browse_trailer_{movie_idx}", help="Trailer"):
+                                        st.session_state.current_trailer_movie = movie["title"]
+                                        st.session_state.current_trailer_details = movie_details
+                                with col2:
+                                    if st.button("➕", key=f"browse_watchlist_{movie_idx}", help="Watchlist"):
+                                        if add_to_watchlist(movie["title"]):
+                                            st.success(f"Added to watchlist!")
+                                with col3:
+                                    if st.button("👁️", key=f"browse_watched_{movie_idx}", help="Watched"):
+                                        if mark_as_watched(movie["title"]):
+                                            st.success(f"Marked as watched!")
+
+                                st.markdown('</div>', unsafe_allow_html=True)
+
+            # Display trailer if selected in browse view
+            if hasattr(st.session_state, 'current_trailer_movie'):
+                st.markdown("---")
+                st.markdown(f'<div class="section-title">Trailer: {st.session_state.current_trailer_movie}</div>',
+                            unsafe_allow_html=True)
+                show_trailer(st.session_state.current_trailer_movie, st.session_state.current_trailer_details)
         else:
-            st.info(f"Showing {len(movies)} movies")
+            st.info("No movies found matching your search criteria.")
 
-            # Display movies in a grid
-            for i, movie in enumerate(movies):
-                display_movie_card(movie, omdb_api)
+    # Movie Comparison page
+    elif selected == "Movie Comparison":
+        st.markdown('<h1 class="main-header">Movie Comparison</h1>', unsafe_allow_html=True)
 
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style='text-align: center; color: #666;'>
-            <p>Built with ❤️ using Streamlit | Movie data from TMDB | Posters from OMDB</p>
+        col1, col2 = st.columns(2)
+
+        with col1:
+            movie1 = st.selectbox("Select first movie:", movie_list, key="compare_movie1")
+        with col2:
+            # Filter out the first movie from second selection
+            movie2_options = [m for m in movie_list if m != movie1]
+            movie2 = st.selectbox("Select second movie:", movie2_options, key="compare_movie2")
+
+        if st.button("Compare Movies", use_container_width=True):
+            if movie1 and movie2:
+                compare_movies(movie1, movie2)
+            else:
+                st.warning("Please select two different movies to compare.")
+
+    # User Statistics page
+    elif selected == "User Statistics":
+        st.markdown('<h1 class="main-header">User Statistics</h1>', unsafe_allow_html=True)
+        display_user_statistics()
+
+        # Watchlist section
+        if st.session_state.user_profile['watchlist']:
+            st.subheader("📋 Your Watchlist")
+            for movie in st.session_state.user_profile['watchlist']:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"• {movie}")
+                with col2:
+                    if st.button("Mark Watched", key=f"watch_{movie}"):
+                        if mark_as_watched(movie):
+                            st.session_state.user_profile['watchlist'].remove(movie)
+                            st.rerun()
+
+        # Recently Watched section
+        if st.session_state.user_profile['watched_movies']:
+            st.subheader("🎬 Recently Watched")
+            recent_movies = st.session_state.user_profile['watched_movies'][-10:]
+            for movie in reversed(recent_movies):
+                rating = st.session_state.user_profile['ratings'].get(movie, "Not rated")
+                st.write(f"• {movie} - ⭐ {rating}")
+
+    # AI Assistant page
+    elif selected == "AI Assistant":
+        st.markdown('<h1 class="main-header">AI Movie Assistant</h1>', unsafe_allow_html=True)
+        movie_chatbot()
+
+    # Developer credit
+    st.markdown("""
+    <div class="developer-credit">
+        <p>Developed by SAGAR | Advanced Movie Recommendation System</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Professional Footer
+    st.markdown("""
+    <div class="footer">
+        <div class="footer-title">MovieFlix</div>
+        <div class="footer-text">
+            <p>© 2025 MovieFlix. All Rights Reserved.</p>
+            <p>Powered by OMDB API & YouTube Integration | Advanced Movie Recommendation Engine</p>
+            <p style="margin-top: 10px; font-size: 0.8rem; color: #888;">
+                Movie Comparisons • User Statistics • AI Assistant • Personalized Recommendations
+            </p>
         </div>
-        """,
-        unsafe_allow_html=True
-    )
+    </div>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
